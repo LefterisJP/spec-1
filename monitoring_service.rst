@@ -44,33 +44,6 @@ Basic requirements for the MS
 * A stable and fast ethereum node connection (channel update transactions should be propagated ASAP as there is competition among the monitoring services)
 * If MS registry is used, a deposit will be required for registration
 
-
-Implementation options
------------------------
-
-* Broadcast: All monitoring services listen on a global shared chat room for balance proofs that act as requests to monitor a given channel. This is the version we will implement.
-* Selective: Users select monitoring services explicitly from a registry or similar and directly provide balance proofs to them
-
-Spec “broadcast”
-================
-
-The incentive for providing the service is simply to collect as many BPs as possible and use  them as a challenge if a close event with an incorrect BP occurs. The first service that updates the channel collects the fee.
-
-Pros and cons
--------------
-
-Pros:
-
-* Easier Implementation (simply dump to a channel)
-* Better privacy for MS - IPs are not exposed anywhere, MS just passively collects messages posted into the channel
-
-Cons:
-
-* Privacy (everyone can see all reported balance updates, i.e. reconstruct transfers)
-* Scalability (number of concurrent transfers in the network become bounded by the chat rooms throughput, can be solved with sharding but increases complexity)
-* Handling and payout of fees is more complicated (probably)
-
-
 General requirements
 --------------------
 
@@ -84,11 +57,9 @@ Monitoring services MUST listen in the provided global chat room
 
 They can decide to accept any balance proofs that are submitted to the chat room.
 
-Once it does accept a BP it MUST provide monitoring for the associated channel at least until a newer BP is provided or the channel is closed. MS SHOULD continue to accept newer balance proofs for the same channel.
+Once it does accept a BP it MUST provide monitoring for the associated channel at least until a newer BP is provided or the channel is settled. MS SHOULD continue to accept newer balance proofs for the same channel.
 
-MS MUST listen for the `ChannelClosed` event for channels that it is monitoring. 
-
-Once a `ChannelClosed` event is seen the MS MUST verify that the channel’s balance matches the latest BP it accepted. If the balances do not match the MS MUST submit that BP to the channel’s `updateTransfer` method.
+Once a `ChannelClosed` or `TransferUpdated` event is seen the MS MUST verify that the channel’s balance matches the latest BP it accepted. If the balances do not match the MS MUST submit that BP to the channel’s `updateTransfer` method.
 
 [TBD] There needs to be a selection mechanism which MS should act at what time (see below in “notes / observations”)
 
@@ -99,12 +70,9 @@ MS SHOULD inspect pending transactions to determine if there are already pending
 Fees/Rewards structure
 ----------------------
 
-In Broadcast mode, monitoring servers compete to be the first to provide a balance proof update. This mechanism is simple to implement: MS will decide if the risk/reward ratio is worth it and submits an on-chain transaction.
+Monitoring servers compete to be the first to provide a balance proof update. This mechanism is simple to implement: MS will decide if the risk/reward ratio is worth it and submits an on-chain transaction.
 
 Fees have to be paid upfront. A smart contract governing the reward payout is required, and will probably add an additional logic to the NettingChannel contract code.
-
-
-How fees work in Broadcast mode is still unclear - SC for the fee collection and reward payout must be spec’d properly.
 
 
 Proposed SC logic
@@ -124,93 +92,73 @@ How will raiden nodes specify/deposit the monitoring fee? How will it be collect
 A scheme to prevent unnecessary simultaneous updates needs to exist. Options:
 MS chose an order amongst themselves
 
-Pro:
+Appendix A: Interfaces
+======================
 
-* Easy to understand
+Broadcast interface
+-------------------
+Client's request to store Balance Proof will be in the usual scenario broadcasted using Matrix as a transport layer. A public chatroom will be available for anyone to join - clients will post balance proofs to the chatroom and Monitoring Service picks them up.
 
-Con:
+Web3 Interface
+--------------
+Monitoring service requires a synced Ethereum node with an enabled JSON-RPC interface. All blockchain operations are performed using this connection.
 
-* Complex to implement
-* Prone to communications failure
-* A deterministic algorithm assigns time slots within the Challenge period where MS are allowed to submit BPs (needs to tie in with the reward SC)
+Event filtering
+'''''''''''''''
+MS MUST filter events for each ``NettingChannelContract`` that belongs to submitted Balance Proofs.
+On ``ChannelClosed`` and ``TransferUpdated`` events state the channel was closed with MUST be compared with the Balance Proof. In case of any discrepancy, channel state must be updated immediately.
+On ``ChannelSettled`` event any state data for this channel MAY be deleted from the MS.
 
-Pro:
+REST interface
+--------------
+The monitoring service MAY expose some of the functionality over RESTful API.
+Therre might be API endpoints that SHOULD be protected from public access (i.e. using some form of authentication).
 
-* (Relatively) easy to implement
+Endpoints
+'''''''''
+* ``GET /api/1/balance_proofs`` - return a JSON list of known balance proofs
+* ``DEL /api/1/balance_proofs/<channel_address>`` - remove balance proof from the internal database
+* ``PUT /api/1/balance_proofs`` - register a balance proof
 
-Con:
+* ``GET /api/1/channel_update`` - return a JSON list of already performed channel updates.
+* ``GET /api/1/channel_update/<channel_address>`` - return a list of updates for a given channel
 
-* Constraints the available time for providing BPs per MS which could lead to missed / failed updates
-* Increased complexity in reward SC
-* Variant of the above: As the end of the Challenge period approaches the algorithm allows increasing numbers of MSs to act simultaneously. This increases the chances of a successful update while preventing unnecessary ones in the common case.
-* ‘Auction’ approach: the reward decreases depending on time/number of participants
-* Mempool monitoring - if there’s multiple txs performing Closing Update, it’s less likely the MS is going to succeed
+* ``GET /api/1/stats`` - various statistics of the server, including count of balance proofs stored, count of balance proofs submitted, count of unique Participants etc.
+
+Appendix B: Message format
+==========================
+Monitoring service uses JSON format to exchange the data.
+For description of the envelope format and required fields of the message please see Transport document.
 
 
-
-Spec “selective”
-================
-Client will select a service he trusts and will submit the balance proof to it.
-
-General requirements
---------------------
-MS SHOULD register themselves in [TBD] (list in a smart contract w/ required deposit for a registration? Also announce fee type and amount via this channel) 
-
-Users wishing for a specific channel to be monitored choose one or more MS from the registry. (Could be automated through the raiden node) (Selecting a MS not in the registry is also in theory possible)
-
-Users are RECOMMENDED to register BPs with multiple MS for increased availability and robustness.
-
-The users provide updated BP to the selected MS via i.e. REST-API
-
-Once the MS accepted a BP via the API it MUST monitor the associated channel until close.
-
-MS MUST listen for the `ChannelClosed` event for channels that it is monitoring. 
-
-Once a `ChannelClosed` event is seen the MS MUST verify that the channel’s balance matches the latest BP it accepted. If the balances do not match the MS MUST submit that BP to the channel’s `updateTransfer` method.
-
-Choosing a service to use
-
-A smart contract will maintain a list of trusted services. To prevent griefing attacks, MS that wants to be included in the list will register itself by depositing a reasonable amount of ETH. Another option is a community-curated list. 
-
-Raiden node will then pick one or more MS from the list, depending on the required degree of redundancy.
-
-Pros and cons
+Balance proof
 -------------
+* nonce (uint64) - it is expected that nonce is incremented by 1 with each Balance Proof exchanged between Channel Participants
+* transferred_amount (uint256) - amount of tokens transferred
+* channel_address (address) - address of the netting channel
+* locksroot (bytes32) - lock root state of the channel
+* extra_hash (bytes32) - implementation dependent extra data
+* signature (bytes32) - ecrecoverable signature of the data above, in order they are listed here
 
-Pros:
-
-* Better Privacy of Raiden nodes
-* Fewer scalability concerns
-
-Cons:
-
-* More complicated Implementation
-* Problem of selecting partner(s) to trust
-* Easier to DDoS the MS
+All of this fields are required. Monitoring Service MUST perform basic verification of these data, namely channel existence. Monitoring service SHOULD accept the message if and only the sender of the message is same as the sender address recovered from the signature.
 
 
-Fees/Rewards structure
-----------------------
-
-Subscription based
-''''''''''''''''''
-A subscription based payments might be useful with this approach. A time-based or membership fee can be used.
-
-Payment per BP submitted
-''''''''''''''''''''''''
-A small fee is collected for every BP submit. As the fees will probably be too low to be sent as an on-chain transaction, a Raiden (or uRaiden) payment channel between client and service should be used.
-
-Reward for successful update of a closing channel
-'''''''''''''''''''''''''''''''''''''''''''''''''
-A smart contract may release the reward to the last participant who submitted the BP. See discussion in Broadcast spec.
+Example data: Balance proof
+---------------------------
+``
+{
+  'nonce': 13,
+  'transferred_amount': 15000,
+  'channel_address': '0x87F5636c67f2Fd4F11710974766a5B1b6f33FB1d',
+  'extra_hash': '0xe0fa3e376941dafc9b3836f80bee307ab2eacb569ec7ccceff5e66b48b1efd9c',
+  'locksroot': '0xebd7dc7d6dd7956e62104182194939a1223c738ffc2a14dbbecb6191cf76f211',
+  'signature': '0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470'
+}
+``
 
 
-
-
-
-
-Problems to consider
-====================
+Appendix C: Problems to consider
+================================
 
 
 Griefing Attack against Monitoring Service (e.g. to distract competitors)
